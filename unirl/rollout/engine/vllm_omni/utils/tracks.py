@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 from typing import Any, List, Optional, Sequence, Tuple
 
 import torch
@@ -11,6 +12,8 @@ from unirl.rollout.engine.sigma_verify import verify_engine_used_sigmas
 from unirl.rollout.engine.vllm_omni.pipelines._shared.interception import read_captures
 from unirl.types.primitives import Image, Images, Text, Texts, Video, Videos
 from unirl.types.segments.latent import make_image_segment
+
+logger = logging.getLogger(__name__)
 
 
 def seed_from_sample_id(sample_id: str) -> int:
@@ -197,7 +200,7 @@ def decoded_text_from_ar(per_request: Sequence[Sequence[Any]]) -> Texts:
 
 
 def _flatten_logprobs(logprobs: Any, fallback_len: int) -> Optional[torch.Tensor]:
-    """Best-effort vLLM-logprob → ``[T]`` float tensor."""
+    """vLLM-logprob → ``[T]`` float tensor, or ``None`` when any step is unusable."""
     if logprobs is None:
         return None
     if not isinstance(logprobs, Sequence) or len(logprobs) == 0:
@@ -205,8 +208,11 @@ def _flatten_logprobs(logprobs: Any, fallback_len: int) -> Optional[torch.Tensor
     values: List[float] = []
     for step in logprobs:
         if step is None:
-            values.append(0.0)
-            continue
+            logger.warning(
+                "_flatten_logprobs: None logprob step, dropping anchor (expected_len=%d)",
+                fallback_len,
+            )
+            return None
         if hasattr(step, "logprob"):
             values.append(float(step.logprob))
             continue
@@ -214,14 +220,21 @@ def _flatten_logprobs(logprobs: Any, fallback_len: int) -> Optional[torch.Tensor
             entry = next(iter(step.values()))
             values.append(float(getattr(entry, "logprob", entry)))
             continue
-        values.append(0.0)
+        logger.warning(
+            "_flatten_logprobs: unusable logprob step of type %s, dropping anchor (expected_len=%d)",
+            type(step).__name__,
+            fallback_len,
+        )
+        return None
     if not values:
         return None
     if len(values) != fallback_len and fallback_len > 0:
-        if len(values) > fallback_len:
-            values = values[:fallback_len]
-        else:
-            values.extend([0.0] * (fallback_len - len(values)))
+        logger.warning(
+            "_flatten_logprobs: logprob length %d != token length %d, dropping anchor",
+            len(values),
+            fallback_len,
+        )
+        return None
     return torch.tensor(values, dtype=torch.float32)
 
 
